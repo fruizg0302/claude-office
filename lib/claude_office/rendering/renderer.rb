@@ -11,75 +11,137 @@ module ClaudeOffice
       end
 
       def render(grid:, agents:, frame:)
-        title = render_title(grid)
-        office = render_office(grid, agents, frame)
+        # Build a plain-text 2D buffer, then style entire lines
+        buffer = build_buffer(grid)
+
+        # Place desks into buffer
+        grid.desks.each do |desk|
+          place_desk(buffer, desk)
+        end
+
+        # Place agents into buffer
+        agent_labels = []
+        agents.each do |agent|
+          place_agent(buffer, agent, frame, agent_labels)
+        end
+
+        # Render buffer to styled string
+        title = render_title
+        office = render_buffer(buffer)
+        labels = render_labels(agent_labels)
         status = render_status_bar(agents)
 
-        Lipgloss.join_vertical(:left, title, office, status)
+        parts = [title, office]
+        parts << labels unless labels.empty?
+        parts << status
+
+        Lipgloss.join_vertical(:left, *parts)
       end
 
       private
 
-      def render_title(grid)
+      def build_buffer(grid)
+        Array.new(grid.height) do |y|
+          Array.new(grid.width) do |x|
+            case grid.tiles[y][x]
+            when :wall then { char: Sprites::WALL_CHAR, type: :wall }
+            else { char: Sprites::FLOOR_CHAR, type: :floor }
+            end
+          end
+        end
+      end
+
+      def place_desk(buffer, desk)
+        dx, dy = desk.position
+        Sprites::DESK.each_with_index do |row, row_i|
+          row.chars.each_with_index do |ch, col_i|
+            bx = dx + col_i
+            by = dy + row_i
+            next if by < 0 || by >= buffer.length
+            next if bx < 0 || bx >= buffer[0].length
+
+            buffer[by][bx] = { char: ch, type: :desk }
+          end
+        end
+      end
+
+      def place_agent(buffer, agent, frame, agent_labels)
+        pos = agent.desk_position
+        face = Sprites.face_for(agent.animation, frame: frame)
+        char_x = pos[0] + 1
+        char_y = pos[1] + Sprites::DESK.length + 1
+
+        # Place face characters into buffer
+        face.chars.each_with_index do |ch, i|
+          bx = char_x + i
+          next if char_y < 0 || char_y >= buffer.length
+          next if bx < 0 || bx >= buffer[0].length
+
+          buffer[char_y][bx] = { char: ch, type: :agent, state: agent.state }
+        end
+
+        # Collect label info for rendering below the grid
+        label_parts = []
+        label_parts << agent.status_text unless agent.status_text.empty?
+
+        agent.sub_agents.each_value do |sub|
+          sub_face = Sprites.sub_face_for(sub.animation)
+          sub_text = "  └─ #{sub_face}"
+          sub_text += " \"#{sub.status_text}\"" unless sub.status_text.empty?
+          label_parts << sub_text
+        end
+
+        if agent.state == :waiting
+          label_parts.unshift("Needs input!")
+        end
+
+        unless label_parts.empty?
+          agent_labels << { state: agent.state, parts: label_parts }
+        end
+      end
+
+      def render_title
         Theme::TITLE_STYLE
           .width(@width)
           .render("claude-office")
       end
 
-      def render_office(grid, agents, frame)
-        lines = []
-
-        grid.height.times do |y|
-          line = ""
-          grid.width.times do |x|
-            case grid.tiles[y][x]
+      def render_buffer(buffer)
+        lines = buffer.map do |row|
+          row.map do |cell|
+            case cell[:type]
             when :wall
-              line += Theme::WALL_STYLE.render(Sprites::WALL_CHAR)
+              Theme::WALL_STYLE.render(cell[:char])
+            when :desk
+              Theme::DESK_STYLE.render(cell[:char])
+            when :agent
+              Theme.agent_style(cell[:state]).render(cell[:char])
             else
-              line += Theme::FLOOR_STYLE.render(Sprites::FLOOR_CHAR)
+              Theme::FLOOR_STYLE.render(cell[:char])
             end
-          end
-          lines << line
+          end.join
         end
 
-        office_str = lines.join("\n")
+        lines.join("\n")
+      end
 
-        grid.desks.each do |desk|
-          desk_str = Sprites::DESK.map { |row| Theme::DESK_STYLE.render(row) }.join("\n")
-          office_str = overlay(office_str, desk_str, desk.position[0], desk.position[1])
-        end
+      def render_labels(agent_labels)
+        return "" if agent_labels.empty?
 
-        agents.each do |agent|
-          face = Sprites.face_for(agent.animation, frame: frame)
-          style = Theme.agent_style(agent.state)
-          agent_str = style.render(face)
-
-          unless agent.status_text.empty?
-            status = Theme::STATUS_TEXT_STYLE.render("\"#{agent.status_text}\"")
-            agent_str = Lipgloss.join_vertical(:center, agent_str, status)
-          end
-
-          agent.sub_agents.each_value do |sub|
-            sub_face = Sprites.sub_face_for(sub.animation)
-            sub_line = Theme::SUB_AGENT_STYLE.render("└─ #{sub_face}")
-            unless sub.status_text.empty?
-              sub_line += " " + Theme::STATUS_TEXT_STYLE.render("\"#{sub.status_text}\"")
+        lines = agent_labels.map do |info|
+          style = Theme.agent_style(info[:state])
+          info[:parts].map do |part|
+            if part.start_with?("  └─")
+              Theme::SUB_AGENT_STYLE.render(part)
+            elsif part == "Needs input!"
+              Theme::WAITING_AGENT_STYLE.render("⚡ #{part}")
+            else
+              Theme::STATUS_TEXT_STYLE.render("  \"#{part}\"")
             end
-            agent_str = Lipgloss.join_vertical(:left, agent_str, sub_line)
-          end
-
-          if agent.state == :waiting
-            bubble = Theme::SPEECH_BUBBLE_STYLE.render("Needs input!")
-            agent_str = Lipgloss.join_vertical(:center, bubble, agent_str)
-          end
-
-          pos = agent.desk_position
-          char_x = pos[0] + 1
-          char_y = pos[1] + Sprites::DESK.length + 1
-          office_str = overlay(office_str, agent_str, char_x, char_y)
+          end.join("\n")
         end
 
-        office_str
+        lines.join("\n")
       end
 
       def render_status_bar(agents)
@@ -96,26 +158,6 @@ module ClaudeOffice
         Theme::STATUS_BAR_STYLE
           .width(@width)
           .render(bar_text)
-      end
-
-      def overlay(base, overlay_str, x, y)
-        base_lines = base.split("\n")
-        overlay_lines = overlay_str.split("\n")
-
-        overlay_lines.each_with_index do |oline, i|
-          target_y = y + i
-          next if target_y < 0 || target_y >= base_lines.length
-
-          base_line = base_lines[target_y]
-          visible_len = Lipgloss.width(oline)
-
-          before = base_line[0...x] || ""
-          after_start = x + visible_len
-          after = base_line[after_start..] || ""
-          base_lines[target_y] = before + oline + after
-        end
-
-        base_lines.join("\n")
       end
     end
   end
