@@ -11,6 +11,9 @@ require_relative "claude_office/office/pathfinder"
 require_relative "claude_office/rendering/sprites"
 require_relative "claude_office/rendering/theme"
 require_relative "claude_office/rendering/renderer"
+require_relative "claude_office/animation/spring_mover"
+require_relative "claude_office/animation/frame_cycle"
+require_relative "claude_office/notification"
 
 module ClaudeOffice
 end
